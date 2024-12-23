@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os
 import openai
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -42,16 +42,66 @@ def gather_memory(layers_needed: List[int]) -> str:
     
     return "\n".join(memory_content)
 
-def run_agent(user_query: str, api_key: Optional[str] = None) -> str:
+def get_completion(messages: List[Dict[str, str]], model: str = "gpt-4") -> str:
     """
-    Run the coding agent with the given query.
+    Get completion from OpenAI API.
+    
+    Args:
+        messages: List of message dictionaries
+        model: Model to use for completion
+    
+    Returns:
+        Model's response text
+    """
+    try:
+        client = openai.OpenAI()
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.3
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+def generate_reflection_prompt(solution: str) -> str:
+    """
+    Generate a reflection prompt for analyzing a solution.
+    
+    Args:
+        solution: The solution to analyze
+    
+    Returns:
+        A prompt for reflection analysis
+    """
+    reflection_prompt = load_text_file("prompts/reflection_prompt.md")
+    if not reflection_prompt:
+        # Fallback reflection prompt if file doesn't exist
+        reflection_prompt = """
+        Analyze the solution provided across each layer:
+        1. Logic Layer: Was the high-level approach sound?
+        2. Concepts Layer: Were relevant patterns/principles applied?
+        3. Important Details Layer: Were crucial implementation details included?
+        4. Arbitrary Layer: Were edge cases considered appropriately?
+
+        Summarize:
+        1. Key strengths
+        2. Areas for improvement
+        3. Additional context needed (if any)
+        """
+    
+    return f"{reflection_prompt}\n\nSolution to analyze:\n{solution}"
+
+def run_agent_with_reflection(user_query: str, api_key: Optional[str] = None) -> Tuple[str, str]:
+    """
+    Run the coding agent with reflection.
     
     Args:
         user_query: The user's coding question or task
-        api_key: Optional OpenAI API key (can also be set via OPENAI_API_KEY env var)
+        api_key: Optional OpenAI API key
     
     Returns:
-        The agent's response
+        Tuple of (initial_response, reflection)
     """
     # Get API key from parameter or environment
     api_key_to_use = api_key or os.getenv("OPENAI_API_KEY")
@@ -63,42 +113,37 @@ def run_agent(user_query: str, api_key: Optional[str] = None) -> str:
     if not system_prompt:
         raise FileNotFoundError("System prompt file not found")
 
-    # For initial implementation, we'll always gather layers 1-3
-    # Layer 4 is only loaded for specific types of queries (could be enhanced later)
+    # Initial layers to load
     layers_to_load = [1, 2, 3]
     if any(keyword in user_query.lower() for keyword in ['legacy', 'old version', 'deprecated', 'edge case']):
         layers_to_load.append(4)
 
     memory_snippets = gather_memory(layers_to_load)
 
-    # Construct the messages for the API call
+    # Get initial solution
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "system", "content": f"Relevant memory:\n{memory_snippets}"},
         {"role": "user", "content": user_query}
     ]
 
-    try:
-        # Create OpenAI client
-        client = openai.OpenAI()
-        
-        # Call the OpenAI API
-        response = client.chat.completions.create(
-            model="gpt-4o",  # Can be changed to gpt-4 or other models
-            messages=messages,
-            temperature=0.3  # Lower temperature for more focused coding responses
-        )
-
-        # Extract and return the response
-        return response.choices[0].message.content
-
-    except Exception as e:
-        return f"Error: {str(e)}"
+    initial_response = get_completion(messages)
+    
+    # Generate reflection
+    reflection_prompt = generate_reflection_prompt(initial_response)
+    reflection_messages = [
+        {"role": "system", "content": "You are a code review assistant performing a reflection analysis."},
+        {"role": "user", "content": reflection_prompt}
+    ]
+    
+    reflection = get_completion(reflection_messages)
+    
+    return initial_response, reflection
 
 def main():
     """Main function to run the agent interactively."""
     print("=== Coding Agent ===")
-    print("Enter your coding questions (Ctrl+C to exit)")
+    print("Enter your coding questions (Ctrl+C or type 'exit' to quit)")
     print("Example: 'How do I implement a REST API with Flask?'")
     
     while True:
@@ -107,10 +152,13 @@ def main():
             user_input = input("> ")
             if user_input.lower() in ['exit', 'quit']:
                 break
-                
-            result = run_agent(user_input)
+            
+            initial_response, reflection = run_agent_with_reflection(user_input)
+            
             print("\n=== Agent's Response ===")
-            print(result)
+            print(initial_response)
+            print("\n=== Reflection Analysis ===")
+            print(reflection)
             
         except KeyboardInterrupt:
             print("\nExiting...")
